@@ -21,8 +21,12 @@ namespace MotionAccessSystem
             Console.WriteLine($"Camera resolution: {actualW}x{actualH}, FPS: {actualFps}");
 
             const string WIN = "Motion Access System";
-            const int MOTION_HOLD_FRAMES = 15;
+            const int MOTION_HOLD_FRAMES = 20;
+            const int FACE_HOLD_FRAMES = 30;
+            const int FACE_STICKY_MIN = 20;
             int motionHold = 0;
+            int faceHold = 0;
+            List<Rect> cachedFaces = new List<Rect>();
 
             Cv2.NamedWindow(WIN, WindowFlags.Normal);
 
@@ -30,6 +34,9 @@ namespace MotionAccessSystem
             stopwatch.Start();
 
             using var motionDetecor = new MotionDetector();
+            string cascadePath = Path.Combine("cascades", "haarcascade_frontalface_default.xml");
+            using var faceDetector = new FaceDetector(cascadePath, minSize: 80);
+
             int frames = 0;
             double lastSec = 0.0;
             string fpsText = "FPS ~ --";
@@ -40,6 +47,8 @@ namespace MotionAccessSystem
                 var display = frame;
 
                 var (triggered, mask) = motionDetecor.Detect(frame);
+                mask.Dispose();
+      
                 
                 if (triggered)
                   motionHold = MOTION_HOLD_FRAMES;
@@ -47,10 +56,65 @@ namespace MotionAccessSystem
                 bool motionActive = triggered || motionHold > 0;
                 if (motionHold > 0)
                     motionHold--;
-                
+
+                int faceCount = 0;
+                if (motionActive)
+                {
+                  var faces = faceDetector.Detect(display);
+                  faceCount = faces.Count;
+                  if (faceCount > 0)
+                  {
+                    cachedFaces = faces;
+                    faceHold = FACE_HOLD_FRAMES;
+                  }
+
+                  else
+                  {
+                    if (cachedFaces.Count > 0)
+                    {
+                      if (faceHold > FACE_STICKY_MIN)
+                        faceHold--;
+                      else
+                        faceHold = FACE_STICKY_MIN;
+                    }
+                    else if (faceHold > 0)
+                      faceHold--;
+                  }
+
+                  if (cachedFaces.Count > 0 && faceHold > 0)
+                  {
+                    faceCount = cachedFaces.Count;
+
+                    foreach (var face in cachedFaces)
+                      Cv2.Rectangle(display, face, Scalar.LimeGreen, 2);
+                  }
+
+                  else
+                    faceCount = 0;
+                }
+                          
+                else
+                {
+                  if (faceHold > 0)
+                    faceHold--;
+
+                  if (cachedFaces.Count > 0 && faceHold > 0)
+                  {
+                    faceCount = cachedFaces.Count;
+                    foreach (var face in cachedFaces)
+                      Cv2.Rectangle(display, face, Scalar.LimeGreen, 2);
+                  }
+
+                  else
+                    faceCount = 0;
+                }
+
+
                 var motionText = motionActive ? "Motion Detected!" : "No Motion";
 
                 Cv2.PutText(display, motionText, new Point(10, 90), HersheyFonts.HersheySimplex, 0.7,motionActive? Scalar.Red : Scalar.Green, 2);
+
+                Cv2.PutText(display, $"Faces: {faceCount}", new Point(10, 120), HersheyFonts.HersheySimplex, 0.7, Scalar.Cyan, 2);
 
                 frames++;
                 var totalSec = stopwatch.Elapsed.TotalSeconds;

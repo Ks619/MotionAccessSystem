@@ -14,7 +14,7 @@ public sealed class MotionDetector : IDisposable
   private int _cooldown = 0;
 
   public MotionDetector(int history = 500, int varThreshold = 16, bool detectShadows = true,
-                        int minArea = 1500, int minMotionFrames = 3, int cooldownFrames = 10)
+                        int minArea = 500, int minMotionFrames = 3, int cooldownFrames = 10)
   {
     _bg = BackgroundSubtractorMOG2.Create(history, varThreshold, detectShadows);
     _minArea = minArea;
