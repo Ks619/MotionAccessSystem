@@ -1,4 +1,5 @@
 ﻿using MotionAccessSystem.Capture;
+using MotionAccessSystem.Vision;
 using OpenCvSharp;
 using System.Diagnostics;
 
@@ -20,12 +21,15 @@ namespace MotionAccessSystem
             Console.WriteLine($"Camera resolution: {actualW}x{actualH}, FPS: {actualFps}");
 
             const string WIN = "Motion Access System";
+            const int MOTION_HOLD_FRAMES = 15;
+            int motionHold = 0;
 
             Cv2.NamedWindow(WIN, WindowFlags.Normal);
 
             var stopwatch = new Stopwatch();
             stopwatch.Start();
 
+            using var motionDetecor = new MotionDetector();
             int frames = 0;
             double lastSec = 0.0;
             string fpsText = "FPS ~ --";
@@ -34,6 +38,19 @@ namespace MotionAccessSystem
             {
                 using var frame = cam.ReadFrame();
                 var display = frame;
+
+                var (triggered, mask) = motionDetecor.Detect(frame);
+                
+                if (triggered)
+                  motionHold = MOTION_HOLD_FRAMES;
+                
+                bool motionActive = triggered || motionHold > 0;
+                if (motionHold > 0)
+                    motionHold--;
+                
+                var motionText = motionActive ? "Motion Detected!" : "No Motion";
+
+                Cv2.PutText(display, motionText, new Point(10, 90), HersheyFonts.HersheySimplex, 0.7,motionActive? Scalar.Red : Scalar.Green, 2);
 
                 frames++;
                 var totalSec = stopwatch.Elapsed.TotalSeconds;
@@ -47,7 +64,7 @@ namespace MotionAccessSystem
                 }
                 Cv2.PutText(display, fpsText, new Point(10, 60),
                         HersheyFonts.HersheySimplex, 0.7, Scalar.White, 2);
-                        
+
                 Cv2.PutText(display, $"{WIN} - (press 'q' to quit)",
                     new Point(10, 30), HersheyFonts.HersheySimplex, 0.7, Scalar.White, 2);
 
