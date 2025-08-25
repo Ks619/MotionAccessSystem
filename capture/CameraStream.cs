@@ -8,14 +8,12 @@ public sealed class CameraStream : IDisposable
 
   public CameraStream(int index = 0, int width = 1280, int height = 720)
   {
-    // Windows DirectShow API
+    // windows DirectShow API
     _cap = new VideoCapture(index, VideoCaptureAPIs.DSHOW);
 
-    // Get resolution
     _cap.Set(VideoCaptureProperties.FrameWidth, width);
     _cap.Set(VideoCaptureProperties.FrameHeight, height);
 
-    // Open the camera
     if(!_cap.IsOpened())
       throw new Exception($"Failed to open camera with index {index}");
     

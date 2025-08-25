@@ -1,99 +1,148 @@
 ﻿using MotionAccessSystem.Capture;
-using MotionAccessSystem.Vision;          // MotionDetector + YoloFaceDetector
+using MotionAccessSystem.Vision;
+using MotionAccessSystem.Logging;
 using OpenCvSharp;
 using System.Diagnostics;
-using System.Collections.Generic;         // List<Rect>
+
 
 namespace MotionAccessSystem
 {
     class Program
     {
+        private static bool IsExitKey(int key)
+        {
+            int k = key & 0xFF;
+            // ESC
+            if (k == 27)
+                return true;  
+
+            if (k == 'q' || k == 'Q')
+                return true;
+            
+            // Hebrew layout for physical 'Q'
+            if (k == '/')
+                return true;    
+
+            return false;
+        }
+
         public static void Main()
         {
             Console.WriteLine("Starting Motion Access System...");
-            Console.WriteLine("Press 'q' in the video window to quit.\n");
+            Console.WriteLine("Press 'q' (or ESC) in the video window to quit.\n");
 
-            using var cam = new CameraStream(index: 0, width: 1280, height: 720);   // Open camera
+            using var cam = new CameraStream(index: 0, width: 1280, height: 720);
 
-            // Read back real properties (driver may override requested size/FPS)
-            double actualW   = cam.Get(VideoCaptureProperties.FrameWidth);
-            double actualH   = cam.Get(VideoCaptureProperties.FrameHeight);
+            // first frame to lock real dimensions (driver might report 0x0)
+            using var first = cam.ReadFrame();
+            int actualW = first.Width;
+            int actualH = first.Height;
+
             double actualFps = cam.Get(VideoCaptureProperties.Fps);
-            Console.WriteLine($"Camera resolution: {actualW}x{actualH}, FPS: {actualFps}");
+            Console.WriteLine($"Camera resolution: {actualW}x{actualH}, Driver FPS: {actualFps}");
+
+            // recorder & logger setup (Israel TZ)
+            int outW = actualW;
+            int outH = actualH;
+            const double TARGET_FPS_FOR_FILE = 20.0;
+
+            var projectRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", ".."));
+            var recordingsDir = Path.Combine(projectRoot, "recordings");
+
+            const string ISRAEL_TZ_ID = "Israel Standard Time"; // falls back to Asia/Jerusalem inside
+
+            using var recorder = new FaceRecorder(
+                outputDir: recordingsDir,
+                targetFps: TARGET_FPS_FOR_FILE,
+                width: outW,
+                height: outH,
+                fourcc: "XVID",
+                holdSeconds: 3.0,     
+                usePreRoll: false,
+                preRollSeconds: 0.0,
+                timeZoneId: ISRAEL_TZ_ID
+            );
+
+            var logger = new EventLogger(recordingsDir);
+            recorder.OnClipClosed = logger.Log;
+            
 
             const string WIN = "Motion Access System";
-            const int MOTION_HOLD_FRAMES = 15; // keep “motion active” a few frames after a trigger
-            const int FACE_HOLD_FRAMES   = 10; // keep last face boxes to reduce flicker
+            const int MOTION_HOLD_FRAMES = 15; 
+            const int FACE_HOLD_FRAMES = 10; 
 
-            int motionHold = 0, faceHold = 0;  // “hold” state counters
-            List<Rect> cachedFaces = new();    // last good detections (drawn while hold > 0)
+            int motionHold = 0, faceHold = 0;
+            var cachedFaces = new List<Rect>();
 
-            Cv2.NamedWindow(WIN, WindowFlags.Normal);    // Create resizable UI window
+            Cv2.NamedWindow(WIN, WindowFlags.Normal);
 
-            var stopwatch = new Stopwatch();   // FPS overlay timer
+            var stopwatch = new Stopwatch();
             stopwatch.Start();
 
-            using var motionDetecor = new MotionDetector();  // background subtraction (disposable)
+            using var motionDetecor = new MotionDetector();
 
-            // YOLO-Face: make sure the ONNX exists at models\yolov11n-face.onnx
-            // (If you prefer a fixed path, use AppContext.BaseDirectory + "models"...)
             string yoloPath = Path.Combine("models", "yolov11n-face.onnx");
             using var faceDetector = new YoloFaceDetector(
                 modelPath: yoloPath,
-                inputSize: 640,     // 320/416/512/640; tradeoff between speed/accuracy
-                confThresh: 0.25f,  // minimum confidence
-                iouThresh: 0.45f    // NMS overlap threshold
+                inputSize: 640,
+                confThresh: 0.25f,
+                iouThresh: 0.45f
             );
 
-            int frames = 0;                // rolling frame counter for FPS overlay
+            int frames = 0;
             double lastSec = 0.0;
             string fpsText = "FPS ~ --";
 
             while (true)
             {
-                using var frame = cam.ReadFrame();  // grab a frame (Mat is IDisposable)
-                var display = frame;                // alias we draw overlays on
+                using var frame = cam.ReadFrame();
+                var display = frame; // draw overlays directly on this Mat
 
-                // Motion detection (returns bool + mask)
+                // motion detection 
                 var (triggered, mask) = motionDetecor.Detect(frame);
-                mask.Dispose();                     // always release the mask Mat
+                mask.Dispose();
+                if (triggered)
+                    motionHold = MOTION_HOLD_FRAMES;
 
-                if (triggered) motionHold = MOTION_HOLD_FRAMES;     // refresh motion hold on trigger
-                bool motionActive = triggered || motionHold > 0;     // gate face detection by motion
-                if (motionHold > 0) motionHold--;                    // decay when idle
+                bool motionActive = triggered || motionHold > 0;
+                if (motionHold > 0)
+                    motionHold--;
 
-                int faceCount = 0;
+                // face detection (every frame) 
+                var faces = faceDetector.Detect(display);
+                int faceCount = faces.Count;
 
-                if (motionActive)
+                // update face cache
+                if (faceCount > 0)
                 {
-                    var faces = faceDetector.Detect(display);        // run YOLO-Face only on motion
-                    faceCount = faces.Count;
-
-                    if (faceCount > 0) { cachedFaces = faces; faceHold = FACE_HOLD_FRAMES; }
-                    else if (faceHold > 0) faceHold--;               // keep boxes briefly after miss
-
-                    if (cachedFaces.Count > 0 && faceHold > 0)       // draw cached boxes during hold
-                    {
-                        faceCount = cachedFaces.Count;
-                        foreach (var face in cachedFaces)
-                            Cv2.Rectangle(display, face, Scalar.LimeGreen, 2);
-                    }
-                    else faceCount = 0;
+                    cachedFaces = faces; 
+                    faceHold = FACE_HOLD_FRAMES;
                 }
-                else
+                else if (faceHold > 0)
+                    faceHold--;
+
+                // draw the green face rectangles 
+                if (cachedFaces.Count > 0 && faceHold > 0)
                 {
-                    // No motion: just decay face hold and optionally keep drawing cache
-                    if (faceHold > 0) faceHold--;
-                    if (cachedFaces.Count > 0 && faceHold > 0)
-                    {
-                        faceCount = cachedFaces.Count;
-                        foreach (var face in cachedFaces)
-                            Cv2.Rectangle(display, face, Scalar.LimeGreen, 2);
-                    }
-                    else faceCount = 0;
+                    foreach (var face in cachedFaces)
+                        Cv2.Rectangle(display, face, Scalar.LimeGreen, 2);
                 }
 
-                // Text overlays: motion status + face count
+                // call update to decide if start recording
+                bool faceDetectedNow = faceCount > 0;
+                recorder.Update(display, faceDetectedNow);
+
+                // REC indicator (top-right)
+                if (recorder.IsRecording)
+                {
+                    int x = display.Width - 120;
+                    int y = 30;
+                    Cv2.Circle(display, new Point(x, y - 6), 8, Scalar.Red, -1);
+                    Cv2.PutText(display, "REC", new Point(x + 18, y),
+                        HersheyFonts.HersheySimplex, 0.7, Scalar.Red, 2);
+                }
+
+                // text overlays: motion, faces count, FPS, title
                 var motionText = motionActive ? "Motion Detected!" : "No Motion";
                 Cv2.PutText(display, motionText, new Point(10, 90),
                     HersheyFonts.HersheySimplex, 0.7, motionActive ? Scalar.Red : Scalar.Green, 2);
@@ -101,7 +150,7 @@ namespace MotionAccessSystem
                 Cv2.PutText(display, $"Faces: {faceCount}", new Point(10, 120),
                     HersheyFonts.HersheySimplex, 0.7, Scalar.Cyan, 2);
 
-                // FPS overlay (updated every ~2s for stable numbers)
+                // FPS overlay (updated every ~2s)
                 frames++;
                 var totalSec = stopwatch.Elapsed.TotalSeconds;
                 if (totalSec - lastSec >= 2.0)
@@ -114,13 +163,31 @@ namespace MotionAccessSystem
                 Cv2.PutText(display, fpsText, new Point(10, 60),
                     HersheyFonts.HersheySimplex, 0.7, Scalar.White, 2);
 
-                // Title + quit hint, render, and key handling
-                Cv2.PutText(display, $"{WIN} - (press 'q' to quit)",
-                    new Point(10, 30), HersheyFonts.HersheySimplex, 0.7, Scalar.White, 2);
+                Cv2.PutText(display, $"{WIN} - press Q/ESC (Hebrew layout: '/') to quit",
+                    new Point(10, 30), HersheyFonts.HersheySimplex, 0.6, Scalar.White, 2);
 
                 Cv2.ImShow(WIN, display);
-                var key = Cv2.WaitKey(1) & 0xFF;
-                if (key == 'q') { Console.WriteLine("Exiting..."); break; }
+
+                int key = Cv2.WaitKey(1);
+                try
+                {
+                    if (Cv2.GetWindowProperty(WIN, WindowPropertyFlags.Visible) < 1)
+                    {
+                        Console.WriteLine("Window closed. Exiting...");
+                        break;
+                    }
+                }
+                catch
+                {
+                    Console.WriteLine("Window no longer exists. Exiting...");
+                    break;
+                }
+
+                if (IsExitKey(key))
+                {
+                    Console.WriteLine("Exit key pressed. Exiting...");
+                    break;
+                }
             }
         }
     }

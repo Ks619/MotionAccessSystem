@@ -13,5 +13,12 @@ obj/
 .idea/
 .vscode/
 
+# Recordings
+recordings/
+*.avi
+*.mp4
+
 # Others
 *.cache
+
+
